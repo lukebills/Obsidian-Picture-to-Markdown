@@ -1,10 +1,14 @@
 import {
     App,
+    Editor,
+    MarkdownView,
     Modal,
     Notice,
     Plugin,
     PluginSettingTab,
-    Setting
+    Setting,
+    TFile,
+    Vault
 } from 'obsidian';
 import OpenAI from 'openai';
 
@@ -29,11 +33,79 @@ export default class Pic2Markdown extends Plugin {
             'aperture',
             'Convert Image(s) to Markdown',
             () => {
-                new Pic2MarkdownModal(this.app, this.settings).open();
+                new Pic2MarkdownModal(this.app, this).open();
             }
         );
 
         this.addSettingTab(new Pic2MarkdownSettingTab(this.app, this));
+
+        this.addCommand({
+            id: 'convert-images-in-active-note-and-prepend',
+            name: 'Convert Images in Active Note & Prepend Text',
+            editorCallback: async (editor: Editor, view: MarkdownView) => {
+                if (!this.settings.openaiApiKey) {
+                    new Notice('OpenAI API key is not set. Please configure it in the plugin settings.');
+                    return;
+                }
+
+                const activeFile = view.file;
+                if (!activeFile) {
+                    new Notice('No active file.');
+                    return;
+                }
+
+                new Notice('Processing images in current note...', 5000);
+
+                const fileCache = this.app.metadataCache.getFileCache(activeFile);
+                const embeds = fileCache?.embeds;
+
+                if (!embeds || embeds.length === 0) {
+                    new Notice('No embedded images found in the current note.');
+                    return;
+                }
+
+                let combinedMarkdown = '';
+                let processedImageCount = 0;
+
+                for (const embed of embeds) {
+                    const imageLink = embed.link;
+                    const imageTFile = this.app.metadataCache.getFirstLinkpathDest(imageLink, activeFile.path);
+
+                    if (imageTFile instanceof TFile) {
+                        const mimeType = this.getMimeType(imageTFile.extension);
+                        if (mimeType) {
+                            try {
+                                new Notice(`Processing ${imageTFile.name}...`, 3000);
+                                const arrayBuffer = await this.app.vault.readBinary(imageTFile);
+                                const imageDataUrl = this.arrayBufferToBase64(arrayBuffer, mimeType);
+                                const gptResult = await this._callOpenAIWithImageData(imageDataUrl);
+
+                                combinedMarkdown += `## Image: ${imageTFile.name}\n\n${gptResult}\n\n`;
+                                processedImageCount++;
+                            } catch (error) {
+                                console.error(`Error processing image ${imageTFile.name}:`, error);
+                                new Notice(`Error processing ${imageTFile.name}: ${(error as Error).message}`);
+                            }
+                        }
+                    }
+                }
+
+                if (processedImageCount === 0) {
+                    new Notice('No processable images found or all image processing failed.');
+                    return;
+                }
+
+                try {
+                    const originalContent = await this.app.vault.read(activeFile);
+                    const newContent = combinedMarkdown.trim() + '\n\n' + originalContent;
+                    await this.app.vault.modify(activeFile, newContent);
+                    new Notice(`${processedImageCount} image(s) processed and text prepended to the note.`);
+                } catch (error) {
+                    console.error('Error updating note content:', error);
+                    new Notice('Error updating note content.');
+                }
+            }
+        });
     }
 
     onunload() {
@@ -47,15 +119,81 @@ export default class Pic2Markdown extends Plugin {
     async saveSettings() {
         await this.saveData(this.settings);
     }
+
+    async _callOpenAIWithImageData(imageData: string): Promise<string> {
+        if (!this.settings.openaiApiKey) {
+            throw new Error('OpenAI API key is not set. Please configure it in the plugin settings.');
+        }
+
+        const openai = new OpenAI({
+            apiKey: this.settings.openaiApiKey,
+            dangerouslyAllowBrowser: true,
+        });
+
+        try {
+            const response = await openai.chat.completions.create({
+                model: "gpt-4.1-mini",
+                messages: [
+                    {
+                        role: "user",
+                        content: [
+                            {
+                                type: "text",
+                                text: "Please convert the text in this image to Markdown. Only output the raw markdown. Do not summarize its content. Handle nested lists with tabs not spaces. Do not include 'markdown' at the top of your output."
+                            },
+                            {
+                                type: "image_url",
+                                image_url: {
+                                    url: imageData,
+                                    detail: "auto"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens: 1000
+            });
+            const output = response.choices[0]?.message?.content || 'No content extracted.';
+            const cleanedOutput = output.replace(/```/g, '').trim();
+            return cleanedOutput;
+        } catch (error) {
+            console.error("Error calling OpenAI:", error);
+            throw error;
+        }
+    }
+
+    getMimeType(extension: string): string | null {
+        const ext = extension.toLowerCase();
+        switch (ext) {
+            case 'png': return 'image/png';
+            case 'jpg':
+            case 'jpeg': return 'image/jpeg';
+            case 'gif': return 'image/gif';
+            case 'bmp': return 'image/bmp';
+            case 'webp': return 'image/webp';
+            case 'svg': return 'image/svg+xml';
+            default: return null;
+        }
+    }
+
+    arrayBufferToBase64(buffer: ArrayBuffer, mimeType: string): string {
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return `data:${mimeType};base64,${window.btoa(binary)}`;
+    }
 }
 
 class Pic2MarkdownModal extends Modal {
-    settings: Pic2MarkdownSettings;
+    plugin: Pic2Markdown;
     spinnerEl: HTMLElement;
 
-    constructor(app: App, settings: Pic2MarkdownSettings) {
+    constructor(app: App, plugin: Pic2Markdown) {
         super(app);
-        this.settings = settings;
+        this.plugin = plugin;
     }
 
     onOpen() {
@@ -63,7 +201,6 @@ class Pic2MarkdownModal extends Modal {
         contentEl.addClass('pic2markdown-modal');
         contentEl.createEl('h2', { text: 'Upload your Image(s)' });
 
-        // === A select to choose the mode: Single, Multi, or Bulk ===
         const container = contentEl.createEl('div', { cls: 'mode-select-container' });
         container.createEl('label', { text: 'Choose mode:' });
 
@@ -74,14 +211,12 @@ class Pic2MarkdownModal extends Modal {
             option.text = mode;
         });
 
-        // === Container for "Name of the new file" label & input ===
         const fileNameContainer = contentEl.createDiv({ cls: 'file-name-container' });
         fileNameContainer.createEl('label', { text: 'Name of the new file:' });
 
         const fileNameInput = fileNameContainer.createEl('input', { type: 'text' });
         fileNameInput.value = 'Untitled';
 
-        // Hide or show container based on the current mode
         const updateFileNameVisibility = () => {
             if (modeSelect.value === 'Bulk') {
                 fileNameContainer.classList.add('hidden');
@@ -92,14 +227,11 @@ class Pic2MarkdownModal extends Modal {
         updateFileNameVisibility();
         modeSelect.addEventListener('change', updateFileNameVisibility);
 
-        // === Container for the "Select image(s)" label & file input ===
         const fileSelectContainer = contentEl.createDiv({ cls: 'file-select-container' });
         fileSelectContainer.createEl('label', { text: 'Select image(s):' });
 
-        // Create wrapper div for custom file input
         const customFileInput = fileSelectContainer.createDiv({ cls: 'custom-file-input' });
 
-        // Create hidden actual file input
         const fileInput = customFileInput.createEl('input', {
             cls: 'pic2markdown-file-input'
         }) as HTMLInputElement;
@@ -107,22 +239,18 @@ class Pic2MarkdownModal extends Modal {
         fileInput.accept = 'image/*';
         fileInput.multiple = true;
 
-        // Create visible custom button
         const customButton = customFileInput.createEl('button', {
             text: 'Choose Image(s)',
             cls: 'styled-file-button'
         });
 
-        // Create element to display selected files
         const fileNamesDisplay = customFileInput.createEl('div', { cls: 'file-names' });
 
-        // Link custom button to file input
         customButton.addEventListener('click', (e) => {
             e.preventDefault();
             fileInput.click();
         });
 
-        // Update displayed file names when files are selected
         fileInput.addEventListener('change', () => {
             if (fileInput.files) {
                 const names = Array.from(fileInput.files).map(f => f.name);
@@ -130,31 +258,26 @@ class Pic2MarkdownModal extends Modal {
             }
         });
 
-        // --- Create a container that holds both button and spinner side by side ---
         const processContainer = contentEl.createDiv({ cls: 'pic2markdown-process-container' });
 
-        // === A button to process the selected file(s) ===
-        const processButton = processContainer.createEl('button', { text: 'Send to GPT-4o' });
+        const processButton = processContainer.createEl('button', { text: 'Send to GPT' });
 
-        // === Create and append the spinner element to the container ===
         this.spinnerEl = processContainer.createEl('div', {
             cls: 'pic2markdown-spinner pic2markdown-spinner-hidden'
         });
 
-        // On click, read user’s chosen file name + image(s), then process
         processButton.addEventListener('click', async () => {
             if (!fileInput.files || fileInput.files.length === 0) {
                 new Notice('Please upload at least one image!');
                 return;
             }
 
-            // Show spinner
             this.spinnerEl.classList.remove('pic2markdown-spinner-hidden');
             this.spinnerEl.classList.add('pic2markdown-spinner-inline');
             processButton.disabled = true;
 
             try {
-                const chosenMode = modeSelect.value; // Single Image, Multi Image, or Bulk
+                const chosenMode = modeSelect.value;
                 if (chosenMode === 'Single Image') {
                     await this.handleSingleImage(fileInput, fileNameInput.value.trim());
                 } else if (chosenMode === 'Multi Image') {
@@ -169,7 +292,6 @@ class Pic2MarkdownModal extends Modal {
                     (error as Error).message || 'An error occurred processing the images.'
                 );
             } finally {
-                // Hide spinner
                 this.spinnerEl.classList.remove('pic2markdown-spinner-inline');
                 this.spinnerEl.classList.add('pic2markdown-spinner-hidden');
                 processButton.disabled = false;
@@ -182,10 +304,6 @@ class Pic2MarkdownModal extends Modal {
         contentEl.empty();
     }
 
-    /**
-     * SINGLE IMAGE:
-     * Processes only the first selected image, then creates a single note with fileName.
-     */
     async handleSingleImage(fileInput: HTMLInputElement, fileName: string) {
         if (!fileName) {
             new Notice('Please enter a valid file name.');
@@ -199,11 +317,6 @@ class Pic2MarkdownModal extends Modal {
         new Notice(`Note "${fileName}" created successfully (Single Image).`);
     }
 
-    /**
-     * MULTI IMAGE:
-     * Processes all selected images and concatenates GPT outputs
-     * into one single note (named fileName).
-     */
     async handleMultiImage(fileInput: HTMLInputElement, fileName: string) {
         if (!fileName) {
             new Notice('Please enter a valid file name.');
@@ -224,11 +337,6 @@ class Pic2MarkdownModal extends Modal {
         new Notice(`Note "${fileName}" created successfully (Multi Image).`);
     }
 
-    /**
-     * BULK:
-     * Processes all selected images, creating a separate note for each file.
-     * The note’s file name is the FIRST LINE of the GPT result, if available.
-     */
     async handleBulk(fileInput: HTMLInputElement) {
         for (let i = 0; i < fileInput.files!.length; i++) {
             const file = fileInput.files![i];
@@ -237,11 +345,9 @@ class Pic2MarkdownModal extends Modal {
 
             let lines = gptResult.trim().split('\n');
             let firstLine = lines[0]?.trim() || '';
-            // If first line is empty, fallback to generic name
             if (!firstLine) {
                 firstLine = `Image_${i + 1}`;
             }
-            // Remove invalid filename characters if necessary
             firstLine = firstLine.replace(/[<>:"/\\|?*]/g, '');
 
             await this.createNewNoteWithContent(gptResult, firstLine);
@@ -249,67 +355,30 @@ class Pic2MarkdownModal extends Modal {
         }
     }
 
-    /**
-     * Convert the image to GPT-4 with Vision’s response.
-     */
     async processImage(file: File): Promise<string> {
-        if (!this.settings.openaiApiKey) {
+        if (!this.plugin.settings.openaiApiKey) {
             throw new Error('OpenAI API key is not set. Please configure it in the plugin settings.');
         }
 
-        const openai = new OpenAI({
-            apiKey: this.settings.openaiApiKey,
-            dangerouslyAllowBrowser: true,
-        });
+        const imageData = await this._getBase64FromFile(file);
+        return this.plugin._callOpenAIWithImageData(imageData);
+    }
 
-        const reader = new FileReader();
-
+    private async _getBase64FromFile(file: File): Promise<string> {
         return new Promise((resolve, reject) => {
-            reader.onload = async (event) => {
+            const reader = new FileReader();
+            reader.onload = (event) => {
                 if (event.target?.result) {
-                    const imageData = event.target.result as string;
-
-                    try {
-                        const response = await openai.chat.completions.create({
-                            model: "gpt-4o-mini", // or whichever model you're using
-                            messages: [
-                                {
-                                    role: "user",
-                                    content: [
-                                        {
-                                            type: "text",
-                                            text: "Please convert the text in this image to Markdown. Only output the raw markdown. Do not summarize its content. Handle nested lists with tabs not spaces. Do not include 'markdown' at the top of your output."
-                                        },
-                                        {
-                                            type: "image_url",
-                                            image_url: {
-                                                url: imageData,
-                                                detail: "auto"
-                                            }
-                                        }
-                                    ]
-                                }
-                            ],
-                            max_tokens: 1000
-                        });
-                        const output = response.choices[0]?.message?.content || 'No content extracted.';
-                        const cleanedOutput = output.replace(/```/g, '').trim();
-                        resolve(cleanedOutput);
-                    } catch (error) {
-                        reject(error);
-                    }
+                    resolve(event.target.result as string);
                 } else {
-                    reject(new Error('File data could not be read.'));
+                    reject(new Error('File data could not be read for base64 conversion.'));
                 }
             };
-            reader.onerror = () => reject(new Error('Failed to read the image file.'));
+            reader.onerror = () => reject(new Error('Failed to read the image file for base64 conversion.'));
             reader.readAsDataURL(file);
         });
     }
 
-    /**
-     * Create a new note in your Obsidian vault with the given GPT output.
-     */
     async createNewNoteWithContent(markdownContent: string, userFileName: string) {
         const vault = this.app.vault;
         const trimmedContent = markdownContent.trim();
@@ -340,13 +409,11 @@ class Pic2MarkdownSettingTab extends PluginSettingTab {
         const { containerEl } = this;
         containerEl.empty();
 
-        // === Add Header ===
         containerEl.createEl('h1', { text: 'Picture to Markdown' });
         
-        // === OpenAI API Key Setting ===
         const setting = new Setting(containerEl)
             .setName('OpenAI API Key')
-            .setDesc('Enter your OpenAI API Key (must have GPT-4o access).')
+            .setDesc('Enter your OpenAI API Key (must have GPT access).')
             .addText((text) => {
                 text
                     .setPlaceholder('sk-...')
@@ -356,14 +423,11 @@ class Pic2MarkdownSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     });
 
-                // Hide the key by default (masking)
                 text.inputEl.type = 'password';
             });
 
-        // Now add the "Show/Hide" button to toggle the password field
         setting.controlEl.createEl('button', { text: 'Show', cls: 'show-hide-btn' }, (btnEl: HTMLButtonElement) => {
             btnEl.addEventListener('click', () => {
-                // Access the text input from the setting
                 const input = setting.settingEl.querySelector('input');
                 if (input instanceof HTMLInputElement) {
                     if (input.type === 'password') {
