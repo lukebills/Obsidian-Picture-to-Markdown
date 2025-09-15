@@ -1,0 +1,35 @@
+{
+	"name": "picture-to-markdown-luke",
+	"version": "1.0.5",
+	"description": "Forked plugin to convert images to Markdown using GPT-4o-mini Vision, with enhancements for handwritten notes and diagram interpretation.",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"version": "node version-bump.mjs && git add manifest.json versions.json"
+	},
+	"keywords": [
+		"image conversion",
+		"handwriting",
+		"markdown",
+		"obsidian-plugin"
+	],
+	"author": "Luke Bills",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^16.11.6",
+		"@typescript-eslint/eslint-plugin": "5.29.0",
+		"@typescript-eslint/parser": "5.29.0",
+		"builtin-modules": "3.3.0",
+		"esbuild": "0.17.3",
+		"obsidian": "latest",
+		"tslib": "2.4.0",
+		"typescript": "4.7.4"
+	},
+	"dependencies": {
+		"dotenv": "^16.4.7",
+		"fs": "^0.0.1-security",
+		"openai": "^5.20.2",
+		"path": "^0.12.7"
+	}
+}

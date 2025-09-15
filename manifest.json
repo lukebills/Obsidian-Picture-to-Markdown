@@ -1,0 +1,11 @@
+{
+  "id": "picture-to-markdown-luke",
+  "name": "Picture to Markdown (Luke's Fork)",
+  "version": "1.0.5",
+  "minAppVersion": "0.12.0",
+  "description": "Forked plugin to convert images to Markdown using GPT-4o-mini Vision, with enhancements for handwritten notes and diagram interpretation.",
+  "author": "Luke Bills",
+  "authorUrl": "https://github.com/lukebills",
+  "isDesktopOnly": false,
+  "styles": "styles.css"
+}
